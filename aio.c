@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
+#include <math.h>
+#include <unistd.h>
 #include <portaudio.h>
 #ifdef WIN32
   #include <windows.h>
@@ -11,24 +14,41 @@
 #include "common.h"
 #include "aio.h"
 
-static int rec_callback(const void *input, void *output, unsigned long frameCount,
-                        const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags,
-                        void *userData)
+static int callback(const void *input, void *output, unsigned long frameCount,
+                    const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags,
+                    void *userData)
 {
     aio_t *aHdl = (aio_t*)userData;
-    const SAMPLE_TYPE *indata = (const SAMPLE_TYPE*)input;
-    memcpy(aHdl->data, indata, sizeof(SAMPLE_TYPE) * MAX(frameCount, MAX_FRAMES_PER_BUFFER));
+    SAMPLE_TYPE *od;
+    long i, j;
+    double t;
+    static double phaset = 0;
+    
+    if(aHdl->io) { /* input */
+        const SAMPLE_TYPE *indata = (const SAMPLE_TYPE*)input;
+        memcpy(aHdl->data, indata, sizeof(SAMPLE_TYPE) * MIN(frameCount, MAX_FRAMES_PER_BUFFER));
+    } else { /* output */
+        od = (SAMPLE_TYPE*)output;
+        for(i=0; i<frameCount; i++) {
+            t = (phaset + aHdl->freq/aHdl->rate * i);
+            od[i] = 1.0*sin(2.0*M_PI * t);
+        }
+        t = (phaset + aHdl->freq/aHdl->rate * i); /* i passes maximum */
+        j = (long)t;
+        phaset = t - (double)j;
+        memcpy(aHdl->data, output, sizeof(SAMPLE_TYPE) * MIN(frameCount, MAX_FRAMES_PER_BUFFER));
+    }
 
     return paContinue;
 }
 
-aio_t *aio_init(int id, double rate)
+aio_t *aio_init(int id, double rate, int io)
 {
     aio_t *aHdl;
     PaError err;
     PaDeviceIndex nd;
     const PaDeviceInfo *devInfo;
-    PaStreamParameters inputParm;
+    PaStreamParameters inputParam, *iP=NULL, outputParam, *oP=NULL;
 
     err = Pa_Initialize();
     if( err != paNoError ) {
@@ -50,31 +70,47 @@ aio_t *aio_init(int id, double rate)
     if(rate < 0.0) rate = devInfo->defaultSampleRate;
 
     aHdl = malloc(sizeof(aio_t));
+    aHdl->io = io;
     aHdl->id = id;
     aHdl->rate = rate;
     aHdl->data = (SAMPLE_TYPE*)malloc(sizeof(SAMPLE_TYPE) * MAX_FRAMES_PER_BUFFER);
 
-    inputParm.device                    = aHdl->id;
-    inputParm.channelCount              = 1;
-    inputParm.sampleFormat              = PA_SAMPLE_TYPE;
-    inputParm.suggestedLatency          = devInfo->defaultLowInputLatency;
-    inputParm.hostApiSpecificStreamInfo = NULL;
+    inputParam.device                    = aHdl->id;
+    inputParam.channelCount              = 1;
+    inputParam.sampleFormat              = PA_SAMPLE_TYPE;
+    inputParam.suggestedLatency          = devInfo->defaultLowInputLatency;
+    inputParam.hostApiSpecificStreamInfo = NULL;
+    if(io) /* input */ iP = &inputParam;
+    
+    outputParam.device                    = aHdl->id;
+    outputParam.channelCount              = 1;
+    outputParam.sampleFormat              = PA_SAMPLE_TYPE;
+    outputParam.suggestedLatency          = devInfo->defaultLowOutputLatency;
+    outputParam.hostApiSpecificStreamInfo = NULL;
+    if(io == 0) /* output */ oP = &outputParam;
     
     err = Pa_OpenStream(&(aHdl->stream),
-                        &inputParm,
-                        NULL,
+                        iP,
+                        oP,
                         aHdl->rate,
                         MAX_FRAMES_PER_BUFFER, //paFramesPerBufferUnspecified,
                         paClipOff,
-                        rec_callback,
+                        callback,
                         aHdl);
     if(err != paNoError)
         error_printf("%s\n", Pa_GetErrorText(err));
     printf("Stream opened on device %d, sample rate %g\n", aHdl->id, aHdl->rate);
+    return aHdl;
+}
+
+int aio_startstream(aio_t *aHdl)
+{
+    PaError err;
+    
     err = Pa_StartStream(aHdl->stream);
     if(err != paNoError)
         error_printf("%s\n", Pa_GetErrorText(err));
-    return aHdl;
+    return err;
 }
 
 int aio_close(aio_t *aHdl)
@@ -105,18 +141,19 @@ int aio_acquire(aio_t *aHdl)
 }
 
 static void PrintSupportedStandardSampleRates(
-    const PaStreamParameters *inputParm,
-    const PaStreamParameters *outputParm)
+    const PaStreamParameters *inputParam,
+    const PaStreamParameters *outputParam)
 {
     static double standardSampleRates[] = {
         8000.0, 9600.0, 11025.0, 12000.0, 16000.0, 22050.0, 24000.0, 32000.0,
-        44100.0, 48000.0, 88200.0, 96000.0, 192000.0, -1 /* negative terminated list */
+        44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0, 352800.0, 384000.0,
+        2822400.0, 5644800.0, -1 /* negative terminated list */
     };
     int i;
     PaError err;
 
     for(i=0; standardSampleRates[i] > 0; i++) {
-        err = Pa_IsFormatSupported(inputParm, outputParm, standardSampleRates[i]);
+        err = Pa_IsFormatSupported(inputParam, outputParam, standardSampleRates[i]);
         if(err == paFormatIsSupported) {
             printf( " %.1f", standardSampleRates[i] );
         }
@@ -129,7 +166,7 @@ int aio_list_devices(void)
     PaError err;
     PaDeviceIndex id, nd;
     const PaDeviceInfo *devInfo;
-    PaStreamParameters inputParm, outputParm;
+    PaStreamParameters inputParam, outputParam;
     int defaultDisplayed;
 
     err = Pa_Initialize();
@@ -151,8 +188,9 @@ int aio_list_devices(void)
     printf("Devices with inputs:\n");
     for(id=0; id<nd; id++) {
         devInfo = Pa_GetDeviceInfo(id);
+#ifndef AIO_DEBUG_ENABLEMAIN
         if(devInfo->maxInputChannels <= 0) continue;
-
+#endif
 #ifdef WIN32
         {   /* Use wide char on windows, so we can show UTF-8 encoded device names */
             wchar_t wideName[MAX_PATH];
@@ -217,31 +255,31 @@ int aio_list_devices(void)
         printf("Default sample rate         = %8.2f\n", devInfo->defaultSampleRate);
 
         /* poll for standard sample rates */
-        inputParm.device = id;
-        inputParm.channelCount = devInfo->maxInputChannels;
-        inputParm.sampleFormat = PA_SAMPLE_TYPE;
-        inputParm.suggestedLatency = 0; /* ignored by Pa_IsFormatSupported() */
-        inputParm.hostApiSpecificStreamInfo = NULL;
+        inputParam.device = id;
+        inputParam.channelCount = devInfo->maxInputChannels;
+        inputParam.sampleFormat = PA_SAMPLE_TYPE;
+        inputParam.suggestedLatency = 0; /* ignored by Pa_IsFormatSupported() */
+        inputParam.hostApiSpecificStreamInfo = NULL;
         
-        outputParm.device = id;
-        outputParm.channelCount = devInfo->maxOutputChannels;
-        outputParm.sampleFormat = PA_SAMPLE_TYPE;
-        outputParm.suggestedLatency = 0; /* ignored by Pa_IsFormatSupported() */
-        outputParm.hostApiSpecificStreamInfo = NULL;
+        outputParam.device = id;
+        outputParam.channelCount = devInfo->maxOutputChannels;
+        outputParam.sampleFormat = PA_SAMPLE_TYPE;
+        outputParam.suggestedLatency = 0; /* ignored by Pa_IsFormatSupported() */
+        outputParam.hostApiSpecificStreamInfo = NULL;
 
-        if(inputParm.channelCount > 0) {
+        if(inputParam.channelCount > 0) {
             printf("Supported standard sample rates for half-duplex %d channel input = \n",
-                   inputParm.channelCount);
-            PrintSupportedStandardSampleRates(&inputParm, NULL);
+                   inputParam.channelCount);
+            PrintSupportedStandardSampleRates(&inputParam, NULL);
         }
-        if(outputParm.channelCount > 0) {
+        if(outputParam.channelCount > 0) {
             printf("Supported standard sample rates for half-duplex %d channel output = \n",
-                    outputParm.channelCount);
-            PrintSupportedStandardSampleRates(NULL, &outputParm);
+                    outputParam.channelCount);
+            PrintSupportedStandardSampleRates(NULL, &outputParam);
         }
-        if(inputParm.channelCount > 0 && outputParm.channelCount > 0) {
+        if(inputParam.channelCount > 0 && outputParam.channelCount > 0) {
             printf("Supported standard sample rates for full-duplex input/output = \n");
-            PrintSupportedStandardSampleRates( &inputParm, &outputParm );
+            PrintSupportedStandardSampleRates( &inputParam, &outputParam );
         }
     }
 error:
@@ -255,8 +293,10 @@ int main(int argc, char **argv)
     aio_t *aHdl;
     aio_list_devices();
     // error_printf(stderr, "Error message: %s\n", Pa_GetErrorText(err));
-    aHdl = aio_init(-1, -1);
+    aHdl = aio_init(1, -1, 0);
     printf("%d %g\n", aHdl->id, aHdl->rate);
+    aHdl->freq = 440.0;
+    aio_startstream(aHdl);
 
     sleep(3);
 

@@ -114,8 +114,8 @@ void draw(void)
 
 int main(int argc, char **argv)
 {
-    int aid=-1;
-    double rate=-1.0;
+    int aid=-1, io=1;
+    double rate=-1.0, freq=440.0;
     
     if(argc == 2) {
         if(argv[1][0] == '-') {
@@ -129,6 +129,11 @@ int main(int argc, char **argv)
     } else if(argc > 2) {
         aid = atoi(argv[1]);
         rate = atof(argv[2]);
+        if(rate < -1.0) { /* output, must specify rate */
+            rate = -rate;
+            io = 0;
+            if(argc > 3) freq = atof(argv[3]);
+        }
     }
     
     glutInit(&argc, argv);
@@ -141,7 +146,9 @@ int main(int argc, char **argv)
     glutReshapeFunc(change_size);
     glutKeyboardFunc(process_normal_keys);
 
-    aHdl = aio_init(aid, rate);
+    aHdl = aio_init(aid, rate, io);
+    aHdl->freq = freq;
+    aio_startstream(aHdl);
     glutMainLoop();
     aio_close(aHdl);
     
