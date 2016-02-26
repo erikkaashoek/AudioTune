@@ -188,9 +188,7 @@ int aio_list_devices(void)
     printf("Devices with inputs:\n");
     for(id=0; id<nd; id++) {
         devInfo = Pa_GetDeviceInfo(id);
-#ifndef AIO_DEBUG_ENABLEMAIN
-        if(devInfo->maxInputChannels <= 0) continue;
-#endif
+        // if(devInfo->maxInputChannels <= 0) continue;
 #ifdef WIN32
         {   /* Use wide char on windows, so we can show UTF-8 encoded device names */
             wchar_t wideName[MAX_PATH];
